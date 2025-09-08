@@ -1,0 +1,63 @@
+import com.amazonaws.services.glue.GlueContext
+import com.amazonaws.services.glue.util.{GlueArgParser, Job}
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.functions.col
+import scala.collection.JavaConverters._
+
+object GlueApp {
+  def main(sysArgs: Array[String]): Unit = {
+    val sc: SparkContext = new SparkContext()
+    val glueContext: GlueContext = new GlueContext(sc)
+    val spark = glueContext.getSparkSession
+    
+    val args = GlueArgParser.getResolvedOptions(sysArgs, Seq("JOB_NAME", "input_path", "output_path").toArray)
+    Job.init(args("JOB_NAME"), glueContext, args.asJava)
+    
+    val inputPath = args("input_path")
+    val outputPath = args("output_path")
+    
+    println(s"=== Starting Student Filter Job ===")
+    println(s"Reading from: $inputPath")
+    println(s"Writing to: $outputPath")
+    
+    try {
+      // Read the CSV file
+      val df = spark.read
+        .option("header", "true")
+        .option("inferSchema", "true")
+        .csv(inputPath)
+
+      println("=== ORIGINAL STUDENT DATA ===")
+      df.show(false)
+      println(s"Total students: ${df.count()}")
+      println("Schema:")
+      df.printSchema()
+
+      // Filter students with age > 10
+      val filtered = df.filter(col("age") > 10)
+      
+      println("=== FILTERED STUDENTS (age > 10) ===")
+      filtered.show(false)
+      println(s"Filtered students count: ${filtered.count()}")
+
+      // Write output to S3
+      filtered.write
+        .option("header", "true")
+        .mode("overwrite")
+        .csv(outputPath)
+
+      println("✅ Job completed successfully!")
+      println(s"📁 Filtered data written to: $outputPath")
+      
+      Job.commit()
+      
+    } catch {
+      case e: Exception =>
+        println(s"❌ Error occurred: ${e.getMessage}")
+        e.printStackTrace()
+        throw e
+    } finally {
+      spark.stop()
+    }
+  }
+}
