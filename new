@@ -1,0 +1,192 @@
+# dags/s3_multistage_eks_spark_12.py
+from __future__ import annotations
+from datetime import datetime, timedelta
+from airflow import DAG
+from airflow.utils.trigger_rule import TriggerRule
+
+# AWS provider: EKS + S3 sensor + SNS
+from airflow.providers.amazon.aws.operators.eks import EksPodOperator
+from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
+from airflow.providers.amazon.aws.operators.sns import SnsPublishOperator
+
+# =========================
+# 🔧 CONFIG — EDIT THESE
+# =========================
+CONFIG = {
+    # Airflow/AWS
+    "aws_conn_id": "aws_default",
+    "region": "us-east-1",
+
+    # EKS / Spark image
+    "eks_cluster_name": "spark-eks-cluster-02",   # your cluster
+    "k8s_namespace": "spark-jobs",
+    "spark_image": "891376921217.dkr.ecr.us-east-1.amazonaws.com/spark-app-test/demo-test:3.5.1",  # your ECR image
+    "container_name": "spark-runner",
+    # If you use IRSA, set a service account name your cluster recognizes:
+    # "k8s_service_account": "spark-irsa",
+
+    # Spark app (Scala JAR example).
+    # Main class should accept: <input_s3> <output_s3> (add more args if needed)
+    "spark_main_class": "com.example.pipeline.StageMain",
+    "app_jar_path": "local:///opt/spark/app/app.jar",   # JAR baked inside the image
+
+    # If using PySpark instead, comment the two above and provide:
+    # "pyspark_file": "local:///opt/spark/app/main.py",
+
+    # S3 I/O
+    "input_bucket": "your-raw-bucket",
+    "input_prefix": "landing/{{ ds }}/dataset/",   # where Stage 1 reads from
+    "output_root": "s3a://your-curated-bucket/pipeline/{{ ds }}/",  # where stages write
+
+    # Optional notifications
+    "sns_topic_arn": "arn:aws:sns:us-east-1:891376921217:mwaa-pipeline-events",
+}
+
+# Number of sequential stages
+NUM_STAGES = 12
+
+# =========================
+# Helpers
+# =========================
+def stage_io_paths(stage_ix: int) -> tuple[str, str]:
+    """
+    Returns (s3_in, s3_out) for a 1-based stage index.
+    Stage 1 reads from configured input bucket/prefix.
+    Later stages read previous stage's output.
+    """
+    if stage_ix == 1:
+        s3_in = f"s3a://{CONFIG['input_bucket']}/{CONFIG['input_prefix'].rstrip('/')}/"
+    else:
+        s3_in = f"{CONFIG['output_root'].rstrip('/')}/stage_{stage_ix-1}/"
+    s3_out = f"{CONFIG['output_root'].rstrip('/')}/stage_{stage_ix}/"
+    return s3_in, s3_out
+
+
+def spark_cmd_for_stage(s3_in: str, s3_out: str, stage_ix: int) -> list[str]:
+    """
+    Build spark-submit command. Extend with per-stage confs if needed.
+    """
+    base_cmd = [
+        "/opt/spark/bin/spark-submit",
+        "--deploy-mode", "cluster",
+        "--master", "k8s://https://$KUBERNETES_PORT_443_TCP_ADDR:$KUBERNETES_SERVICE_PORT",
+        "--conf", f"spark.kubernetes.container.image={CONFIG['spark_image']}",
+        # S3A credentials via instance profile / IRSA:
+        "--conf", "spark.hadoop.fs.s3a.aws.credentials.provider=com.amazonaws.auth.InstanceProfileCredentialsProvider",
+        "--conf", f"spark.hadoop.fs.s3a.endpoint=s3.{CONFIG['region']}.amazonaws.com",
+        # Tweak resources per your cluster (examples):
+        "--conf", "spark.executor.instances=3",
+        "--conf", "spark.executor.memory=4g",
+        "--conf", "spark.executor.cores=2",
+        "--conf", "spark.driver.memory=2g",
+    ]
+
+    if "spark_main_class" in CONFIG and "app_jar_path" in CONFIG:
+        # Scala/Java JAR
+        return base_cmd + [
+            "--class", CONFIG["spark_main_class"],
+            CONFIG["app_jar_path"],
+            s3_in,
+            s3_out,
+            "--stage", str(stage_ix),  # optional: let app know the stage number
+        ]
+    else:
+        # PySpark file
+        return base_cmd + [
+            CONFIG["pyspark_file"],
+            s3_in,
+            s3_out,
+            "--stage", str(stage_ix),  # optional
+        ]
+
+
+# =========================
+# DAG DEFINITION
+# =========================
+default_args = {
+    "owner": "data-eng",
+    "depends_on_past": False,
+    "retries": 2,
+    "retry_delay": timedelta(minutes=5),
+    "email_on_failure": False,
+    "email_on_retry": False,
+}
+
+with DAG(
+    dag_id="s3_multistage_eks_spark_12",
+    description="12-stage Spark pipeline on EKS: S3 in -> Spark -> S3 out (chained)",
+    default_args=default_args,
+    start_date=datetime(2025, 9, 1),
+    schedule_interval="0 3 * * *",  # daily @ 03:00 UTC
+    catchup=False,
+    max_active_runs=1,
+    tags=["mwaa", "eks", "spark", "s3", "multistage"],
+) as dag:
+
+    # Optional: wait for Stage 1 inputs to exist in S3
+    wait_for_stage1_input = S3KeySensor(
+        task_id="wait_for_stage1_input",
+        aws_conn_id=CONFIG["aws_conn_id"],
+        bucket_name=CONFIG["input_bucket"],
+        bucket_key=CONFIG["input_prefix"].rstrip("/") + "/*",  # wildcard ok
+        wildcard_match=True,
+        mode="reschedule",
+        poke_interval=60,
+        timeout=60 * 60 * 4,  # 4 hours
+        soft_fail=False,
+    )
+
+    # Build the 12 stages dynamically
+    prev = wait_for_stage1_input
+    stage_tasks = []
+
+    for ix in range(1, NUM_STAGES + 1):
+        s3_in, s3_out = stage_io_paths(ix)
+
+        task = EksPodOperator(
+            task_id=f"stage_{ix}_spark_submit",
+            cluster_name=CONFIG["eks_cluster_name"],
+            namespace=CONFIG["k8s_namespace"],
+            pod_name=f"spark-stage-{ix}-{{{{ ds_nodash }}}}",
+            image=CONFIG["spark_image"],
+            container_name=CONFIG["container_name"],
+            cmds=spark_cmd_for_stage(s3_in, s3_out, ix),
+            # If you use a specific K8s SA (IRSA), uncomment:
+            # service_account_name=CONFIG.get("k8s_service_account"),
+            get_logs=True,
+            startup_timeout_seconds=900,
+            in_cluster=False,  # MWAA is outside EKS
+            labels={"app": "spark", "pipeline": "multistage", "stage": str(ix)},
+            env_vars={"AWS_REGION": CONFIG["region"]},
+            do_xcom_push=False,
+        )
+
+        prev >> task
+        prev = task
+        stage_tasks.append(task)
+
+    # Notifications (optional)
+    notify_success = SnsPublishOperator(
+        task_id="notify_success",
+        target_arn=CONFIG["sns_topic_arn"],
+        subject="MWAA: 12-stage EKS Spark pipeline SUCCEEDED",
+        message=(
+            "✅ Pipeline succeeded\n"
+            f"DAG: {dag.dag_id}\n"
+            f"Stages: {NUM_STAGES}\n"
+            f"Final output: {stage_io_paths(NUM_STAGES)[1]}"
+        ),
+        aws_conn_id=CONFIG["aws_conn_id"],
+        trigger_rule=TriggerRule.ALL_SUCCESS,
+    )
+
+    notify_failure = SnsPublishOperator(
+        task_id="notify_failure",
+        target_arn=CONFIG["sns_topic_arn"],
+        subject="MWAA: 12-stage EKS Spark pipeline FAILED",
+        message="❌ Pipeline failed. Check Airflow task logs for the failing stage.",
+        aws_conn_id=CONFIG["aws_conn_id"],
+        trigger_rule=TriggerRule.ONE_FAILED,
+    )
+
+    stage_tasks[-1] >> [notify_success, notify_failure]
