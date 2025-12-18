@@ -1,0 +1,19 @@
+from pyspark.sql.functions import col
+
+cols_to_compare = [
+    "details.name",
+    "details.age",
+    "details.city",
+    "details.salary",
+    "details.department"
+]
+
+df1_sel = df1.select(
+    col("id").alias("pk"),
+    *[col(c).alias(c.replace(".", "_") + "_df1") for c in cols_to_compare]
+)
+
+df2_sel = df2.select(
+    col("id").alias("pk"),
+    *[col(c).alias(c.replace(".", "_") + "_df2") for c in cols_to_compare]
+)
