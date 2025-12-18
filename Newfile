@@ -1,0 +1,49 @@
+from pyspark.sql.functions import col
+
+cols_to_compare = [
+    "details.name",
+    "details.age",
+    "details.city",
+    "details.salary",
+    "details.department"
+]
+
+df1_sel = df1.select(
+    col("id").alias("pk"),
+    *[col(c).alias(c.replace(".", "_") + "_df1") for c in cols_to_compare]
+)
+
+df2_sel = df2.select(
+    col("id").alias("pk"),
+    *[col(c).alias(c.replace(".", "_") + "_df2") for c in cols_to_compare]
+)
+
+
+joined_df = df1_sel.join(df2_sel, on="pk", how="inner")
+
+
+diff_conditions = [
+    col(f"{c.replace('.', '_')}_df1") != col(f"{c.replace('.', '_')}_df2")
+    for c in cols_to_compare
+]
+
+from functools import reduce
+from operator import or_
+
+diff_df = joined_df.filter(reduce(or_, diff_conditions))
+
+
+from pyspark.sql.functions import when, lit
+
+result_df = diff_df.select(
+    "pk",
+    *[
+        when(
+            col(f"{c.replace('.', '_')}_df1") != col(f"{c.replace('.', '_')}_df2"),
+            lit("DIFF")
+        ).otherwise(lit("MATCH")).alias(c.replace(".", "_") + "_status")
+        for c in cols_to_compare
+    ]
+)
+
+
