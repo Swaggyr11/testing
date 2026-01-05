@@ -15,3 +15,10 @@ Helm is a package manager for Kubernetes that simplifies deploying applications 
 For Quantexa deployments, which involve multiple microservices and environment-specific configurations, Helm provides a configuration-driven and consistent approach. Deployment values such as CPU, memory, and replicas are stored in values.yaml files, allowing the same chart to be used across dev, test, and prod environments.
 
 Helm ensures repeatability, simplifies upgrades and rollbacks, and manages dependencies like services, ConfigMaps, and secrets together. This makes deployments faster, safer, and easier to maintain, which is especially valuable for DST Bank’s Quantexa platform requiring secure and controlled updates.
+
+
+
+aws eks describe-nodegroup \
+  --cluster-name <cluster-name> \
+  --nodegroup-name <nodegroup-name> \
+  --region <region>
