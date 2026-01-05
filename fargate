@@ -1,0 +1,17 @@
+AWS Fargate is a serverless compute engine for containers that removes the need to manage EC2 nodes, OS patching, or capacity planning. You pay only for CPU and memory while pods are running.
+
+In EKS, Fargate can work alongside EC2-based nodes, allowing a hybrid model where some pods run on EC2 and others on Fargate. The EKS control plane remains fully managed by AWS.
+
+In a Quantexa architecture, Fargate fits best for stateless microservices like Resolver, Search, and Investigation services, as well as for short-lived batch jobs such as Spark drivers, ingestion controllers, or Airflow-triggered tasks. It offers automatic scaling, high availability, and no node management, aligning with DST Bank’s need for dynamic resource adjustment.
+
+However, Fargate is not suitable for large Spark executors, heavy-memory workloads, or stateful services that require local storage—in such cases, EC2-backed node groups or EMR/EMR on EKS are better options.
+
+
+------------
+
+Helm Charts and Simplified Kubernetes Deployment
+Helm is a package manager for Kubernetes that simplifies deploying applications by using reusable templates instead of manually writing YAML files.
+
+For Quantexa deployments, which involve multiple microservices and environment-specific configurations, Helm provides a configuration-driven and consistent approach. Deployment values such as CPU, memory, and replicas are stored in values.yaml files, allowing the same chart to be used across dev, test, and prod environments.
+
+Helm ensures repeatability, simplifies upgrades and rollbacks, and manages dependencies like services, ConfigMaps, and secrets together. This makes deployments faster, safer, and easier to maintain, which is especially valuable for DST Bank’s Quantexa platform requiring secure and controlled updates.
