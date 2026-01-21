@@ -1,0 +1,16 @@
+aws logs get-log-events \
+  --log-group-name '/aws/airflow/airflow-citi-mwaa-975009921323-us-east-1-ygfob-DAGProcessing' \
+  --log-stream-name 'scheduler_quantexa-br-individual-pipeline.py.log' \
+  --output text > cloudwatch_logs.txt
+
+aws logs get-log-events `
+  --log-group-name "/aws/airflow/airflow-citi-mwaa-975009921323-us-east-1-ygfob-DAGProcessing" `
+  --log-stream-name "scheduler_quantexa-br-individual-pipeline.py.log" `
+  --output text > cloudwatch_logs.txt
+
+aws logs describe-log-groups --query "logGroups[*].logGroupName" --output text
+
+aws logs describe-log-streams \
+  --log-group-name "/aws/airflow/airflow-citi-mwaa-975009921323-us-east-1-ygfob-DAGProcessing" \
+  --query "logStreams[*].logStreamName" \
+  --output text
