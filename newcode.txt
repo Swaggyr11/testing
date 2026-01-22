@@ -23,6 +23,17 @@ aws logs get-log-events --log-group-name "/aws/airflow/airflow-citi-mwaa-9750099
 aws logs get-log-events `
   --log-group-name "/aws/airflow/airflow-citi-mwaa-975009921323-us-east-1-ygfob-DAGProcessing" `
   --log-stream-name "scheduler_quantexa-br-individual-pipeline.py.log" `
+
+-------------------------------
+
+name := "LogFilter"
+
+version := "0.1"
+
+scalaVersion := "2.12.18"  // or "3.3.7" if using Scala 3
+
+libraryDependencies += "com.lihaoyi" %% "ujson" % "3.3.0"
+
   --output text | Out-File -FilePath cloudwatch_logs.txt; aws s3 cp cloudwatch_logs.txt s3://mwaa-airflow-logs-export/scheduler_quantexa_log.txt
 
 aws logs get-log-events \
