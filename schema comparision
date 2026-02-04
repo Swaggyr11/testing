@@ -1,0 +1,125 @@
+import org.apache.spark.sql.{SparkSession, DataFrame}
+import org.apache.spark.sql.functions._
+import scala.collection.JavaConverters._
+import org.apache.hadoop.fs.{FileSystem, Path}
+import scala.util.Try
+
+object CompareDynamicS3Parquet {
+  def main(args: Array[String]): Unit = {
+
+    // ======== Handle Arguments ========
+    if (args.length < 3) {
+      System.err.println(
+        "Usage: CompareDynamicS3Parquet <base1> <base2> <reportPath>\n" +
+        "Example:\n" +
+        "spark-submit ... CompareDynamicS3Parquet " +
+        "s3://bucket/results/dummy/ s3://bucket/results/dummy2/ s3://bucket/results/report/"
+      )
+      System.exit(1)
+    }
+
+    val base1 = args(0)
+    val base2 = args(1)
+    val reportPath = args(2)
+
+    val spark = SparkSession.builder()
+      .appName("CompareDynamicS3Parquet")
+      .getOrCreate()
+
+    import spark.implicits._
+
+    val fs = FileSystem.get(spark.sparkContext.hadoopConfiguration)
+    val path1 = new Path(base1)
+
+    // ==== STEP 1: Get all parquet directories recursively ====
+    val folders = fs.listFiles(path1, true).asScala
+      .map(_.getPath.getParent.toString)
+      .filter(_.endsWith("/"))
+      .distinct
+      .toSeq
+
+    println(s"✅ Found ${folders.size} folders under $base1")
+
+    // ==== STEP 2: Normalize paths (remove date/time parts) ====
+    def normalizePath(p: String): String = {
+      p.replaceAll("""\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}""", "")
+        .replaceAll("""\d{4}-\d{2}-\d{2}""", "")
+        .replaceAll("""\d{2}-\d{2}-\d{2}""", "")
+        .replaceAll("/+", "/")
+    }
+
+    // ==== STEP 3: Group by normalized relative path ====
+    val normalizedGroups = folders.groupBy(f => normalizePath(f.stripPrefix(base1)))
+
+    // To collect report results
+    var results = Seq.empty[(String, String, String, Long, Long, String)]
+
+    normalizedGroups.foreach { case (normalizedRelPath, actualFolders) =>
+
+      val comparePath1 = actualFolders.max // latest or any path
+      val comparePath2Candidates = fs.listFiles(new Path(base2), true).asScala
+        .map(_.getPath.getParent.toString)
+        .filter(_.contains(normalizedRelPath))
+        .distinct
+
+      println(s"\n=== Comparing normalized folder: $normalizedRelPath ===")
+
+      if (comparePath2Candidates.isEmpty) {
+        println(s"⚠️ No matching folder found in dummy2 for: $normalizedRelPath")
+        results = results :+ (normalizedRelPath, comparePath1, "N/A", 0L, 0L, "MISSING_IN_DUMMY2")
+      } else {
+        val comparePath2 = comparePath2Candidates.max
+        println(s"Comparing:\n  base1: $comparePath1\n  base2: $comparePath2")
+
+        Try {
+          val df1 = spark.read.parquet(comparePath1)
+          val df2 = spark.read.parquet(comparePath2)
+
+          val count1 = df1.count()
+          val count2 = df2.count()
+          println(s"Row count - base1: $count1, base2: $count2")
+
+          val schema1 = df1.schema
+          val schema2 = df2.schema
+          val schemaMatch = schema1.equals(schema2)
+
+          if (schemaMatch) println("✅ Schema match")
+          else println("❌ Schema mismatch")
+
+          val status =
+            if (schemaMatch && count1 == count2) "MATCH"
+            else if (!schemaMatch) "SCHEMA_MISMATCH"
+            else "ROW_COUNT_MISMATCH"
+
+          results = results :+ (
+            normalizedRelPath,
+            comparePath1,
+            comparePath2,
+            count1,
+            count2,
+            status
+          )
+
+        }.recover {
+          case e: Exception =>
+            println(s"❌ Error reading/parsing Parquet in $normalizedRelPath: ${e.getMessage}")
+            results = results :+ (normalizedRelPath, comparePath1, "ERROR", 0L, 0L, "ERROR")
+        }
+      }
+    }
+
+    // ==== STEP 4: Write comparison summary to S3 ====
+    val resultDF = results.toDF("relative_path", "base1_path", "base2_path", "row_count_base1", "row_count_base2", "status")
+
+    resultDF.show(truncate = false)
+
+    resultDF.coalesce(1)
+      .write.mode("overwrite")
+      .option("header", "true")
+      .csv(reportPath)
+
+    println(s"\n📁 Comparison report written to: $reportPath")
+
+    spark.stop()
+  }
+}
