@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: s3-rowcount-job
+spec:
+  template:
+    spec:
+      serviceAccountName: s3-access-sa  # must have IRSA role for S3 access
+      containers:
+      - name: rowcount
+        image: python:3.10
+        env:
+          - name: S3_BUCKET
+            value: "my-bucket"        # 👈 your S3 bucket name here
+          - name: S3_PREFIX
+            value: "data/"            # 👈 folder path inside bucket
+        command: ["bash", "-c"]
+        args:
+          - |
+            pip install boto3 pyarrow >/dev/null 2>&1
+            python - <<'EOF'
+            import os, boto3, pyarrow.parquet as pq, io
+
+            bucket = os.getenv("S3_BUCKET")
+            prefix = os.getenv("S3_PREFIX")
+
+            s3 = boto3.client('s3')
+            total_per_folder = {}
+            paginator = s3.get_paginator("list_objects_v2")
+
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    key = obj["Key"]
+                    if key.endswith(".parquet"):
+                        folder = f"s3://{bucket}/{'/'.join(key.split('/')[:-1])}/"
+                        buf = io.BytesIO()
+                        s3.download_fileobj(bucket, key, buf)
+                        buf.seek(0)
+                        table = pq.read_table(buf)
+                        count = table.num_rows
+                        total_per_folder[folder] = total_per_folder.get(folder, 0) + count
+
+            for f, c in total_per_folder.items():
+                print(f"{f} => {c}")
+            EOF
+      restartPolicy: Never
+  backoffLimit: 0
