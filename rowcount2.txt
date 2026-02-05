@@ -1,0 +1,48 @@
+import org.apache.spark.sql.SparkSession
+import org.apache.hadoop.fs.{FileSystem, Path}
+
+object S3FolderParquetRowCount {
+  def main(args: Array[String]): Unit = {
+
+    val spark = SparkSession.builder()
+      .appName("S3FolderParquetRowCount")
+      .getOrCreate()
+
+    val s3RootPath = "s3://my-bucket/data/" // change this to your S3 base path
+    val fs = FileSystem.get(spark.sparkContext.hadoopConfiguration)
+
+    // Function to recursively list all Parquet files
+    def listParquetFiles(path: Path): Seq[Path] = {
+      val statuses = fs.listStatus(path)
+      statuses.flatMap {
+        case f if f.isDirectory => listParquetFiles(f.getPath)
+        case f if f.getPath.getName.endsWith(".parquet") => Seq(f.getPath)
+        case _ => Seq.empty
+      }
+    }
+
+    val parquetFiles = listParquetFiles(new Path(s3RootPath))
+    println(s"Found ${parquetFiles.size} Parquet files\n")
+
+    // Collect row counts per file
+    val counts = parquetFiles.map { filePath =>
+      val df = spark.read.parquet(filePath.toString)
+      val rowCount = df.count()
+      val parentFolder = filePath.getParent.toString.stripSuffix("/") + "/"
+      (parentFolder, rowCount)
+    }
+
+    // Aggregate by folder
+    val folderCounts = counts
+      .groupBy(_._1)
+      .mapValues(_.map(_._2).sum)
+
+    // Print folder totals
+    println("=== Folder-wise Row Counts ===")
+    folderCounts.toSeq.sortBy(_._1).foreach { case (folder, totalRows) =>
+      println(s"$folder => $totalRows")
+    }
+
+    spark.stop()
+  }
+}
